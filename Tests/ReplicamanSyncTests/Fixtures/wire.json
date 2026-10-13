@@ -5,14 +5,14 @@
       "message": {
         "specversion": "1.0",
         "id": "13fb2e27-3bf1-4415-b5a4-904e37b6494c",
-        "source": "urn:ferment:client:example",
-        "type": "ferment.example.v1",
+        "source": "urn:example:client:example",
+        "type": "example.change.v1",
         "datacontenttype": "application/json",
         "data_base64": "e30="
       },
-      "canonical_header": "{\"datacontenttype\":\"application/json\",\"id\":\"13fb2e27-3bf1-4415-b5a4-904e37b6494c\",\"source\":\"urn:ferment:client:example\",\"specversion\":\"1.0\",\"type\":\"ferment.example.v1\"}",
+      "canonical_header": "{\"datacontenttype\":\"application/json\",\"id\":\"13fb2e27-3bf1-4415-b5a4-904e37b6494c\",\"source\":\"urn:example:client:example\",\"specversion\":\"1.0\",\"type\":\"example.change.v1\"}",
       "decoded_data_hex": "7b7d",
-      "sha256": "1ba3ec6a2a07babb7285a5f07defe4a0b214dd4f2ca3400cc6a1e01a8ec229f8"
+      "sha256": "05f36349252e770165ebfa85976530f7361e2c8d85e2603b99c489ffb8a17025"
     }
   ],
   "base64": [

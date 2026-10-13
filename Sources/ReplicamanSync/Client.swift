@@ -17,7 +17,8 @@ public struct ClientLimits: Sendable {
 /// One actor per stream. `runReads` and `runSender` may run concurrently;
 /// a failed outbound request never prevents confirmed reads.
 public actor SyncClient {
-    private let store: any SyncStore
+    public let stream: String
+    private let configuration: ClientConfiguration
     private let transport: any SyncTransport
     private let limits: ClientLimits
     private let now: @Sendable () -> TimeInterval
@@ -46,28 +47,33 @@ public actor SyncClient {
     }
 
     public init(
-        store: any SyncStore, transport: any SyncTransport, limits: ClientLimits = .init(),
+        stream: String, configuration: ClientConfiguration, transport: any SyncTransport,
+        limits: ClientLimits = .init(),
         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         wallNow: @escaping @Sendable () -> Date = { Date() },
         jitter: @escaping @Sendable () -> Double = { Double.random(in: 0.5...1.0) }
     ) async throws {
+        try Wire.check(Wire.matches(stream, #"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#), "stream")
         try Wire.check(
             (1...100).contains(limits.pageItems) && limits.snapshotItems > 0
                 && limits.snapshotBytes > 0, "limits")
-        self.store = store
+        self.stream = stream
+        self.configuration = configuration
         self.transport = transport
         self.limits = limits
         self.now = now
         self.wallNow = wallNow
         self.jitter = jitter
 
-        // Reopening a store replaces its previous client. The persisted token
+        // Reopening a stream replaces its previous client. The persisted token
         // makes both old responses and future work from that instance harmless.
         while true {
-            let current = try await store.load().validated()
+            let current = try await configuration.load(stream).validated()
+            try Wire.check(current.scope.stream == stream, "stream_mismatch")
             var next = current.edited()
             next.lease = lease
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 readFailures = next.readRetry.failures
                 sendFailures = next.sendRetry.failures
@@ -81,7 +87,8 @@ public actor SyncClient {
     }
 
     public func state() async throws -> ClientState {
-        let current = try await store.load().validated()
+        let current = try await configuration.load(stream).validated()
+        try Wire.check(current.scope.stream == stream, "stream_mismatch")
         guard current.lease == lease else { throw SyncError.superseded }
         return current
     }
@@ -99,7 +106,7 @@ public actor SyncClient {
         var next = current.edited()
         next.prepared = PreparedOperation(
             message: message, hash: message.hash, outcome: nil, cancel: false)
-        return try await store.commit(
+        return try await configuration.commit(
             Transition(expected: current, next: next, change: .prepare(message)))
     }
 
@@ -111,7 +118,8 @@ public actor SyncClient {
             var next = current.edited()
             next.prepared = pending
             next.sendPause = nil
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 return
             }
@@ -130,7 +138,8 @@ public actor SyncClient {
                 next.repairedBase = false
             case .send: next.sendPause = nil
             }
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 return
             }
@@ -139,12 +148,14 @@ public actor SyncClient {
 
     /// The host must archive/isolate original editable data and queue inside
     /// this transition. Catalog hosts may discard their reproducible cache.
+    /// The stream is immutable; create another client for a different stream.
     public func replaceScope(_ scope: Scope, reason: String) async throws {
+        try Wire.check(scope.stream == stream, "stream_mismatch")
         while true {
             let current = try await state()
             var next = ClientState(scope: scope)
             next.lease = lease
-            if try await store.commit(
+            if try await configuration.commit(
                 Transition(expected: current, next: next, change: .archive(reason: reason)))
             {
                 assembly = nil
@@ -221,7 +232,7 @@ public actor SyncClient {
                 guard current.session == initial.session else { return .stale }
                 var (updated, settlements) = try StateChange.receipt(receipt, in: current)
                 updated.sendRetry = RetryState()
-                if try await store.commit(
+                if try await configuration.commit(
                     Transition(
                         expected: current, next: updated.edited(),
                         change: .receipt(receipt, settlements: settlements)))
@@ -301,7 +312,7 @@ public actor SyncClient {
                     && current.recovery == nil
             else { return .stale }
             let (updated, settlements) = try StateChange.page(page, in: current)
-            if try await store.commit(
+            if try await configuration.commit(
                 Transition(
                     expected: current, next: updated.edited(),
                     change: .page(page, settlements: settlements)))
@@ -323,7 +334,7 @@ public actor SyncClient {
             next.head = 0
         }
         let change: ApplicationChange = damaged ? .archive(reason: "damaged_base") : .metadata
-        let committed = try await store.commit(
+        let committed = try await configuration.commit(
             Transition(expected: current, next: next, change: change))
         if committed {
             assembly = nil
@@ -400,7 +411,7 @@ public actor SyncClient {
             }
             if now() >= saved.deadline { return try await restartSnapshot(current) }
             let (updated, settlements) = try StateChange.snapshot(saved.first, in: current)
-            if try await store.commit(
+            if try await configuration.commit(
                 Transition(
                     expected: current, next: updated.edited(),
                     change: .snapshot(
@@ -420,7 +431,9 @@ public actor SyncClient {
             attempt: Wire.uuid(), pending: current.prepared.map { [$0.pending] } ?? [],
             minimumCursor: current.recovery?.minimumCursor ?? current.cursor ?? 0,
             limit: limits.pageItems)
-        if try await store.commit(Transition(expected: current, next: next, change: .metadata)) {
+        if try await configuration.commit(
+            Transition(expected: current, next: next, change: .metadata))
+        {
             assembly = nil
             target = nil
             return .progress
@@ -441,7 +454,8 @@ public actor SyncClient {
             } else {
                 next.sendRetry = RetryState()
             }
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 if lane == .read {
                     readFailures = 0
@@ -473,7 +487,8 @@ public actor SyncClient {
             } else {
                 next.sendRetry = retry
             }
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 if lane == .read {
                     readFailures = failures
@@ -520,7 +535,8 @@ public actor SyncClient {
             }
             var next = current.edited()
             if lane == .read { next.readPause = code } else { next.sendPause = code }
-            if try await store.commit(Transition(expected: current, next: next, change: .metadata))
+            if try await configuration.commit(
+                Transition(expected: current, next: next, change: .metadata))
             {
                 return .paused(code)
             }

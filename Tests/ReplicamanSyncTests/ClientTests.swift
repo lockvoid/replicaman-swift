@@ -17,7 +17,8 @@ final class ClientTests: XCTestCase {
                     scope: scope, attempt: try request.string("attempt"), cursor: 0,
                     items: [try message("initial baseline")]))
         }
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let work = await client.readStep()
         let state = try await client.state()
         let values = await store.values()
@@ -43,7 +44,8 @@ final class ClientTests: XCTestCase {
             XCTAssertEqual(request["cursor"], .string("2"))
             return ok(pull(scope: scope, cursor: 5, to: 5, head: 10))
         }
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let first = await client.readStep()
         let second = await client.readStep()
         let state = try await client.state()
@@ -59,7 +61,8 @@ final class ClientTests: XCTestCase {
         let network = ScriptedTransport()
         let clock = TestClock()
         let client = try await SyncClient(
-            store: store, transport: network, now: clock.now, jitter: { 1 })
+            stream: try testScope().stream, configuration: store.configuration, transport: network,
+            now: clock.now, jitter: { 1 })
         let operation = try message(" ab")
         await store.edit(" ab")
         let revision = try await client.state().revision
@@ -98,7 +101,8 @@ final class ClientTests: XCTestCase {
         let scope = try testScope()
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let operation = try message(" ab")
         _ = try await client.prepare(operation, expectedRevision: client.state().revision)
         await network.enqueue { _, _ in
@@ -140,7 +144,8 @@ final class ClientTests: XCTestCase {
         let network = ScriptedTransport()
         let clock = TestClock()
         let client = try await SyncClient(
-            store: store, transport: network, now: clock.now, jitter: { 1 })
+            stream: try testScope().stream, configuration: store.configuration, transport: network,
+            now: clock.now, jitter: { 1 })
         let operation = try message("poison")
         _ = try await client.prepare(operation, expectedRevision: client.state().revision)
         try await client.cancel()
@@ -171,7 +176,8 @@ final class ClientTests: XCTestCase {
         let network = ScriptedTransport()
         let clock = TestClock()
         let client = try await SyncClient(
-            store: store, transport: network, now: clock.now, jitter: { 1 })
+            stream: try testScope().stream, configuration: store.configuration, transport: network,
+            now: clock.now, jitter: { 1 })
         _ = try await client.prepare(message("edit"), expectedRevision: client.state().revision)
         for number in 1...9 {
             await network.enqueue { _, _ in
@@ -208,7 +214,8 @@ final class ClientTests: XCTestCase {
         var settings = ClientLimits()
         settings.pageItems = 1
         let first = try await SyncClient(
-            store: firstStore, transport: network, limits: settings,
+            stream: try testScope().stream, configuration: firstStore.configuration,
+            transport: network, limits: settings,
             now: clock.now, wallNow: clock.date, jitter: { 1 }
         )
         await network.enqueue { _, request in
@@ -222,7 +229,8 @@ final class ClientTests: XCTestCase {
         settings.pageItems = 2
         clock.advance(1)
         let restarted = try await SyncClient(
-            store: reopened, transport: network, limits: settings,
+            stream: try testScope().stream, configuration: reopened.configuration,
+            transport: network, limits: settings,
             now: clock.now, wallNow: clock.date
         )
         await network.enqueue { _, request in
@@ -249,7 +257,8 @@ final class ClientTests: XCTestCase {
         let network = ScriptedTransport()
         let clock = TestClock()
         let first = try await SyncClient(
-            store: store, transport: network, now: clock.now, wallNow: clock.date, jitter: { 1 }
+            stream: try testScope().stream, configuration: store.configuration, transport: network,
+            now: clock.now, wallNow: clock.date, jitter: { 1 }
         )
         let operation = try message("outbound")
         _ = try await first.prepare(operation, expectedRevision: first.state().revision)
@@ -264,7 +273,8 @@ final class ClientTests: XCTestCase {
 
         let reopened = try TestStore.open(file)
         let second = try await SyncClient(
-            store: reopened, transport: network, now: clock.now, wallNow: clock.date
+            stream: try testScope().stream, configuration: reopened.configuration,
+            transport: network, now: clock.now, wallNow: clock.date
         )
         let sending = await second.sendStep()
         let reading = await second.readStep()
@@ -289,13 +299,15 @@ final class ClientTests: XCTestCase {
     func testReplacedInstanceStopsBeforeItCanReadOrPrepareMoreWork() async throws {
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let first = try await SyncClient(store: store, transport: network)
+        let first = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let oldRevision = try await first.state().revision
         await network.enqueue { _, _ in
             HTTPReply(status: 503, headers: ["Retry-After": "900"], body: Data())
         }
         _ = await first.readStep()
-        let second = try await SyncClient(store: store, transport: network)
+        let second = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
 
         let result = await first.readStep()
         let requests = await network.count()
@@ -321,11 +333,13 @@ final class ClientTests: XCTestCase {
             await gate.hold()
             return HTTPReply(status: 200, body: Data("malformed".utf8))
         }
-        let first = try await SyncClient(store: store, transport: network)
+        let first = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let request = Task { await first.readStep() }
         await gate.waitUntilHeld()
 
-        let second = try await SyncClient(store: store, transport: network)
+        let second = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         await gate.release()
         let result = await request.value
         let state = try await second.state()
@@ -338,7 +352,8 @@ final class ClientTests: XCTestCase {
         let scope = try testScope()
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         await network.enqueue { _, _ in fail("cursor_expired", 409) }
         _ = await client.readStep()
         await store.edit("created while downloading")
@@ -427,7 +442,8 @@ final class ClientTests: XCTestCase {
         let scope = try testScope()
         let store = TestStore(ClientState(scope: try testScope()))
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         await store.failNextInstall(.storage("disk_full"))
         await network.enqueue { _, request in
             ok(
@@ -453,7 +469,8 @@ final class ClientTests: XCTestCase {
     func testOldAccountMalformedReplyIsDiscardedBeforeDecoding() async throws {
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         await network.enqueue { _, _ in
             await store.replace(ClientState(scope: try testScope(subject: "user:2")))
             return HTTPReply(status: 200, body: Data("invalid JSON".utf8))
@@ -469,7 +486,8 @@ final class ClientTests: XCTestCase {
         let scope = try testScope()
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         await store.failNextPage(.inapplicable)
         await network.enqueue { _, _ in
             ok(pull(scope: scope, cursor: 1, events: [log(try message("bad"), cursor: 1)]))
@@ -492,7 +510,8 @@ final class ClientTests: XCTestCase {
         let scope = try testScope()
         let store = TestStore(baseState())
         let network = ScriptedTransport()
-        let client = try await SyncClient(store: store, transport: network)
+        let client = try await SyncClient(
+            stream: try testScope().stream, configuration: store.configuration, transport: network)
         let operation = try message("own")
         _ = try await client.prepare(operation, expectedRevision: client.state().revision)
         await network.enqueue { _, _ in
@@ -545,7 +564,7 @@ actor ScriptedTransport: SyncTransport {
     }
 }
 
-private final class TestClock: @unchecked Sendable {
+final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var time: TimeInterval = 1
     func now() -> TimeInterval { lock.withLock { time } }
@@ -553,8 +572,15 @@ private final class TestClock: @unchecked Sendable {
     func advance(_ delta: TimeInterval) { lock.withLock { time += delta } }
 }
 
-private actor ResponseGate {
+actor ResponseGate {
     private var continuation: CheckedContinuation<Void, Never>?
+    private var hasHeld = false
+
+    func holdOnce() async {
+        guard !hasHeld else { return }
+        hasHeld = true
+        await hold()
+    }
 
     func hold() async {
         await withCheckedContinuation { continuation = $0 }
@@ -570,7 +596,13 @@ private actor ResponseGate {
     }
 }
 
-actor TestStore: SyncStore {
+actor TestStore {
+    nonisolated var configuration: ClientConfiguration {
+        ClientConfiguration(
+            load: { _ in await self.load() },
+            commit: { try await self.commit($0) })
+    }
+
     struct Disk: Codable {
         var state: ClientState
         var base: [String] = []

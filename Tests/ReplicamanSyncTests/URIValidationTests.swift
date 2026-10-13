@@ -6,7 +6,7 @@ import XCTest
 final class URIValidationTests: XCTestCase {
     func testSourcesAcceptAbsoluteAndRelativeReferencesWithoutRewritingThem() throws {
         let references = [
-            "urn:ferment:client:example",
+            "urn:example:client:example",
             "https://example.org/path?key=value#fragment",
             "/catalog/1",
             "../catalog/1",

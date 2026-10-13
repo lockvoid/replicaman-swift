@@ -1,117 +1,110 @@
-# Replicaman Swift client
+# Replicaman for Swift
 
-A Swift 6 package for the [Replicaman v1 protocol](../replicaman-server/docs/PROTOCOL.md).
-Requires iOS 17 or macOS 14. The application owns its database, models,
-authorization, discovery, and conflict handling. The SDK has no storage framework
-dependency and generates no application code.
+Replicaman synchronizes application data through ordered events and snapshots.
+This Swift client handles delivery, retries, cancellation, and recovery. Your
+application supplies authentication, payload handling, and two callbacks that
+save protocol state together with application data.
 
-## Connect
+Requires Swift 6, iOS 17 or later, or macOS 14 or later. The package has no
+external dependencies and works with your application's storage system. It
+implements the [Replicaman v1 protocol](https://github.com/lockvoid/replicaman-server/blob/main/docs/PROTOCOL.md).
 
-Create a `Scope` from the application's bootstrap response. Persist one `client`
-UUID per local store. A fresh `ClientState(scope:)` has no base: the first read
-downloads a snapshot, even if the server's position is zero.
+## Add the package
+
+For a local checkout, add this dependency and library product to `Package.swift`:
 
 ```swift
+ dependencies: [
+     .package(path: "../replicaman-swift")
+ ],
+ targets: [
+     .target(name: "YourApp", dependencies: [
+         .product(name: "ReplicamanSync", package: "replicaman-swift")
+     ])
+ ]
+```
+
+In Xcode, add the package directory as a local package and link `ReplicamanSync`
+to your app target.
+
+## Connect one stream
+
+Create a `Scope` from your application's bootstrap response and persist one
+client UUID per installation's local store. A fresh `ClientState(scope:)` has
+no confirmed base: its first read downloads a snapshot, even if the server's
+position is zero.
+
+The following example runs in an async context. `database` and `credentials`
+are APIs supplied by your application:
+
+```swift
+import ReplicamanSync
+
 let transport = try URLSessionTransport(endpoint: serverURL) {
     await credentials.currentHeaders()
 }
-let client = try await SyncClient(store: applicationStore, transport: transport)
+let configuration = ClientConfiguration(
+    load: { stream in try await database.loadReplicaState(stream: stream) },
+    commit: { transition in try await database.commitReplication(transition) }
+)
+let client = try await SyncClient(
+    stream: scope.stream,
+    configuration: configuration,
+    transport: transport
+)
 
 let reader = Task { await client.runReads() }
 let sender = Task { await client.runSender() }
 ```
 
-Here `applicationStore` implements `SyncStore`; `credentials` is the application's
-credential provider. Own these tasks in the application lifecycle and call
-`reader.cancel()` / `sender.cancel()` on unbind. Call `readStep()` on launch, foreground, connectivity restoration,
-or a doorbell hint; it coalesces with an active read. `runReads` also polls.
-Catalog consumers need only the reader. Run at most four streams concurrently
-for the initial catalog profile.
+`load` returns the persisted state for that stream, or a fresh state for its
+scope. `commit` compares the complete expected state, applies the application
+change, and saves the next state in **one durable transaction**. Return `false`
+on a race; an exception must roll back everything. The
+[storage integration guide](docs/INTEGRATION.md) explains local edits, snapshot
+deadlines, and recovery archives. Implement that contract before using the
+client with production data.
 
-Creating a client atomically claims a local ownership token. A replaced instance
-returns `Work.stopped`; it cannot adopt another instance's state or prepare more
-work. `replaceScope` explicitly archives or isolates the old application data and
-queue before binding a new account or epoch. The transport never follows
-redirects, so request credentials do not travel to another origin.
+The transport appends `/replicaman/v1/{push,pull,snapshot}` to `serverURL`.
+Use HTTPS in production; loopback HTTP is available for local development.
+Credentials refresh for each request, and redirects are refused.
 
-## One application transaction
+## Drive the client
 
-`SyncStore` has two methods:
+Keep the tasks in your application's lifecycle. Cancel `reader` and `sender`
+when unbinding the client. A read-only consumer needs only the reader. Create
+one client per stream and run at most four concurrently for the default catalog
+profile.
 
-```swift
-func load() async throws -> ClientState
-func commit(_ transition: Transition) async throws -> Bool
-```
+Call `readStep()` on launch, foreground entry, connectivity restoration, or a
+notification hint. It coalesces with an active read; `runReads()` also polls.
+Temporary failures retry automatically and preserve server retry deadlines.
+Use `resume(.read)` or `resume(.send)` after repairing an access, format, or
+storage problem.
 
-`commit` must do all of the following in **one transaction**:
+A new client claims a persisted ownership token, so late replies to a replaced
+client cannot change current state. Changing accounts or epochs uses
+`replaceScope` and archives the old work. A different stream requires another
+client.
 
-1. Compare the stored state with `transition.expected`; return `false` on a race.
-2. Apply `transition.change` to the confirmed data, intents, and recovery archive.
-3. Save `transition.next`, including the queue, cursor, and recovery barrier.
+## Limits and verification
 
-An exception must roll back everything. Never acknowledge a page after saving
-only its cursor. If optimistic work cannot be reconciled, archive it in the same
-transaction instead of blocking confirmed reading. For snapshots, validate the
-assembled image, replace the confirmed base, and reconcile **current** local
-intents, including edits made during download. Page order does not promise parent
-records before children.
-
-Immediately before committing a snapshot, compare `validUntilUptime` with
-`ProcessInfo.processInfo.systemUptime`. If the deadline has elapsed, roll back and
-return `false`; the SDK starts a new attempt. The deadline is local and ephemeral.
-
-Every local edit saves its intent and `state.edited()` atomically. Encode an
-outbound operation against that revision, then call
-`prepare(message, expectedRevision:)`. A `false` result means recompute against
-the latest state. The SDK permits one prepared operation per stream and blocks
-preparation during snapshots. The original ID, hash, and bytes survive retries.
-
-An accepted push does not advance the read cursor. The application applies its
-own canonical event too; `Settlement.decided` removes the corresponding
-optimistic edit. A server noop has a reason and no payload; an empty payload is
-still ordinary application data. `Settlement.disputed` requires preserving the
-original work for recovery.
-
-## Recovery
-
-Snapshots stage in bounded memory, separately from the confirmed base. The
-attempt, pending list, effective page limit, and preparation barrier persist.
-Restart retries that creation request; abandoned attempts receive new IDs.
-Defaults bound an image to 2,048 items and 64 MiB of decoded payload. Transport
-bodies are bounded to 48 MiB after decompression and exchanges to 60 seconds.
-JSON and application decoding consume additional memory; measure peak usage on
-supported devices before increasing these limits.
-
-Disconnects, 408, 429, and 5xx retry automatically. Eight failures are an
-observable status, not a pause. Read and send counters remain independent.
-Server retry deadlines persist across restarts. While running, delays use a
-monotonic clock; restoration uses the device's wall clock to calculate the
-remaining delay. Changing that clock across a restart can affect the wait.
-
-`resume(.read)` or `resume(.send)` follows repair of an access, format, or storage
-problem. Neither replaces an operation ID nor bypasses a server retry deadline.
-`cancel()` retains the original operation/hash; cancellation may return a prior
-acceptance, which still needs its canonical result. One inapplicable-page
-failure triggers an archived snapshot recovery; a repeated failure is exposed.
-
-`epoch_changed`, `stream_not_found`, and `stream_gone` are surfaced to the host,
-which refreshes discovery and archives or closes the affected scope. Application
-payload versions and merge rules remain the host's responsibility.
-
-## Validate
+The default snapshot profile allows 2,048 items and 64 MiB of decoded payload.
+HTTP bodies are limited to 48 MiB after decompression, and network exchanges to
+60 seconds. Payload formats and merge rules belong to the application; measure
+staging and decoding memory on supported devices before increasing limits.
 
 ```sh
 swift test --disable-swift-testing
 xcrun swift-format lint --recursive Sources Tests Package.swift
 ```
 
-Tests share the Rust wire/hash fixture and exercise response loss, cancellation,
-canonical own-event application, snapshot cuts, durable retry/attempt state,
-callback rollback, and replaced-client fencing. The test store uses an atomic
-file replacement for restart traces; it does not establish the correctness of a
-production database adapter or application codec. Those need their own tests.
+Tests cover wire/hash fixtures, lost replies, cancellation, canonical events,
+snapshot recovery, retries across restarts, callback rollback, and replaced
+clients. The test store is a fixture rather than a production database adapter.
+See [the integration guide](docs/INTEGRATION.md) for the complete storage
+obligations and verification scope.
 
-URI syntax is delegated to Foundation's strict RFC 3986 initializer. A small
-Network-framework check covers Foundation's acceptance of malformed bracketed
-IP literals. The JSON reader exists because ordinary dictionary decoding loses
-duplicate keys before they can be rejected.
+## License
+
+[MIT](LICENSE).

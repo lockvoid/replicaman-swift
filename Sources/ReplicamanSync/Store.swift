@@ -130,16 +130,6 @@ public struct Transition: Sendable {
     }
 }
 
-/// The application supplies the ONLY storage boundary. `commit` must compare
-/// the full expected state, then apply `change` and save `next` in one transaction.
-/// Return false for a version/context race. Throwing must roll back everything.
-/// If `validUntilUptime` expires during application, roll back and return false.
-/// Never split this into independent apply/saveCursor/removePending callbacks.
-public protocol SyncStore: Sendable {
-    func load() async throws -> ClientState
-    func commit(_ transition: Transition) async throws -> Bool
-}
-
 enum StateChange {
     static func receipt(_ receipt: Receipt, in state: ClientState) throws -> (
         ClientState, [Settlement]
